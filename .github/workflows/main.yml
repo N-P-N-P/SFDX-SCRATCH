@@ -27,12 +27,14 @@ jobs:
         run: |
           npm install --global @salesforce/cli
           sf --version
-      # Install sfdx-git-delta plugin with auto confirmation
+
+      # Install sfdx-git-delta plugin with auto confirmation of unsigned plugin
       - name: Install sfdx-git-delta plugin
         run: |
           echo y | sf plugins install sfdx-git-delta
           sf sgd source delta --help
-      # Authenticate to Salesforce Org
+
+      # Authenticate to Salesforce Org using JWT key
       - name: Authenticate to Org
         env:
           SF_JWT_KEY: ${{ secrets.SF_JWT_KEY }}
@@ -47,7 +49,8 @@ jobs:
             --alias dev \
             --set-default
           sf org display --target-org dev
-      # Generate delta package.xml (without .sgdignore since none exists)
+
+      # Generate delta package.xml (without .sgdignore)
       - name: Generate Delta and package.xml
         id: delta
         run: |
@@ -60,6 +63,7 @@ jobs:
           else
             echo "has_delta=false" >> $GITHUB_OUTPUT
           fi
+
       # Validate deployment (dry run)
       - name: Validate Deployment
         if: steps.delta.outputs.has_delta == 'true'
@@ -70,19 +74,8 @@ jobs:
             --manifest delta/package/package.xml \
             --dry-run \
             --ignore-warnings
-      # Create PR on successful validation
-      - name: Create Pull Request
-        if: steps.validate.outcome == 'success'
-        uses: peter-evans/create-pull-request@v5
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: 'Validated changes'
-          title: 'Validated deployment changes to main'
-          body: 'Auto PR after successful validation.'
-          base: main
-          branch: ${{ github.ref_name }}
 
-      # Deploy to dev org
+      # Deploy to Salesforce org only if validation succeeded
       - name: Deploy Changes to Dev Org
         if: steps.validate.outcome == 'success'
         run: |
@@ -90,8 +83,9 @@ jobs:
             --target-org dev \
             --manifest delta/package/package.xml \
             --ignore-warnings
+
       - name: Job Complete
-        run: echo "✅ Deployment Job Finished"
+        run: echo "Deployment Job Finished"
 
       - name: Cleanup Key File
         run: rm -f server.key
