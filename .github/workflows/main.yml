@@ -1,4 +1,4 @@
-name: Validate Delta & Create PR from Feature Branch
+name: Simple Delta Deployment
 
 on:
   push:
@@ -6,116 +6,92 @@ on:
       - 'feature/**'
 
 jobs:
-  validate-and-pr:
-    name: Validate Delta and Create PR
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Start job
-      - name: Start Job
-        run: echo "Starting delta validation and PR job..."
+      # Setup Node 20 for Salesforce CLI compatibility
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
 
-      # 2. Checkout full git history for diffs
+      # Checkout full git history (needed for delta calculation)
       - name: Checkout Code
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      # 3. Get branch name
-      - name: Get Branch Name
-        id: get_branch
-        run: echo "branch_name=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
-
-      # 4. Install Salesforce CLI
+      # Install Salesforce CLI
       - name: Install Salesforce CLI
         run: |
           npm install --global @salesforce/cli
           sf --version
-
-      # 5. Install sfdx-git-delta plugin
-      - name: Install sfdx-git-delta
-        run: sf plugins install sfdx-git-delta
-
-      # 6. Write JWT private key to file
-      - name: Write JWT Private Key
-        run: echo "${{ secrets.SF_JWT_KEY }}" > server.key
-
-      # 7. Authenticate using JWT
-      - name: Authenticate to Dev Org via JWT
+      # Install sfdx-git-delta plugin with auto confirmation
+      - name: Install sfdx-git-delta plugin
         run: |
+          echo y | sf plugins install sfdx-git-delta
+          sf sgd source delta --help
+      # Authenticate to Salesforce Org
+      - name: Authenticate to Org
+        env:
+          SF_JWT_KEY: ${{ secrets.SF_JWT_KEY }}
+          SF_CLIENT_ID: ${{ secrets.SF_CLIENT_ID }}
+          SF_USERNAME: ${{ secrets.SF_USERNAME }}
+        run: |
+          echo "$SF_JWT_KEY" > server.key
           sf org login jwt \
-            --client-id ${{ secrets.SF_CLIENT_ID }} \
+            --client-id $SF_CLIENT_ID \
             --jwt-key-file server.key \
-            --username ${{ secrets.SF_USERNAME }} \
+            --username $SF_USERNAME \
             --alias dev \
             --set-default
           sf org display --target-org dev
-
-      # 8. Generate delta package for changed metadata and destructive changes
-      - name: Generate Delta Package
-        id: generate_delta
+      # Generate delta package.xml (without .sgdignore since none exists)
+      - name: Generate Delta and package.xml
+        id: delta
         run: |
-          mkdir -p .sgd-delta
-          sfdx sgd:source:delta --to HEAD --from HEAD~1 --output .sgd-delta --generate-destructive-changes --source force-app
-
-          # Check if delta folder contains source
-          if [ -d ".sgd-delta/force-app" ]; then
-            echo "delta=true" >> $GITHUB_OUTPUT
+          mkdir -p delta
+          sf sgd source delta --to HEAD --from HEAD~1 --output-dir delta --ignore-whitespace -d
+          if [ -f "delta/package/package.xml" ]; then
+            echo "has_delta=true" >> $GITHUB_OUTPUT
+            echo "Delta package.xml generated:"
+            cat delta/package/package.xml
           else
-            echo "delta=false" >> $GITHUB_OUTPUT
+            echo "has_delta=false" >> $GITHUB_OUTPUT
           fi
-
-      # 9. Determine test classes to run based on delta (run all if no Apex changes)
-      - name: Determine Test Classes to Run
-        id: test_classes
-        run: |
-          if [[ "${{ steps.generate_delta.outputs.delta }}" == "true" ]]; then
-            # Find all Apex class names in the delta folder
-            TEST_CLASSES=$(find .sgd-delta/force-app/main/default/classes -name "*.cls" -exec basename {} .cls \; | paste -sd "," -)
-            if [[ -z "$TEST_CLASSES" ]]; then
-              echo "test_classes=RunAllTestsInOrg" >> $GITHUB_OUTPUT
-            else
-              echo "test_classes=$TEST_CLASSES" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "test_classes=RunAllTestsInOrg" >> $GITHUB_OUTPUT
-          fi
-
-      # 10. Validate Deployment (dry run with test classes)
+      # Validate deployment (dry run)
       - name: Validate Deployment
-        if: steps.generate_delta.outputs.delta == 'true'
+        if: steps.delta.outputs.has_delta == 'true'
+        id: validate
         run: |
-          echo "Running deployment validation with tests: ${{ steps.test_classes.outputs.test_classes }}"
           sf project deploy start \
             --target-org dev \
-            --source-dir .sgd-delta/force-app \
-            --test-level RunSpecifiedTests \
-            --tests "${{ steps.test_classes.outputs.test_classes }}" \
+            --manifest delta/package/package.xml \
             --dry-run \
             --ignore-warnings
-
-      # 11. Skip deployment if no delta
-      - name: Skip Deployment - No Changes
-        if: steps.generate_delta.outputs.delta == 'false'
-        run: echo "No changes detected, skipping deployment."
-
-      # 12. Create Pull Request on success
+      # Create PR on successful validation
       - name: Create Pull Request
-        if: success() && steps.generate_delta.outputs.delta == 'true'
+        if: steps.validate.outcome == 'success'
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: 'Validated delta changes from feature branch ${{ steps.get_branch.outputs.branch_name }}'
-          title: 'Validated Delta Deployment for ${{ steps.get_branch.outputs.branch_name }}'
-          body: |
-            This PR is auto-generated after successful validation of delta deployment from feature branch ${{ steps.get_branch.outputs.branch_name }}.
+          commit-message: 'Validated changes'
+          title: 'Validated deployment changes to main'
+          body: 'Auto PR after successful validation.'
           base: main
-          branch: ${{ steps.get_branch.outputs.branch_name }}
+          branch: ${{ github.ref_name }}
 
-      # 13. Cleanup private key file
-      - name: Cleanup
-        run: rm -f server.key
-
-      # 14. Job Complete
+      # Deploy to dev org
+      - name: Deploy Changes to Dev Org
+        if: steps.validate.outcome == 'success'
+        run: |
+          sf project deploy start \
+            --target-org dev \
+            --manifest delta/package/package.xml \
+            --ignore-warnings
       - name: Job Complete
-        run: echo "Delta validation and PR workflow complete."
+        run: echo "✅ Deployment Job Finished"
+
+      - name: Cleanup Key File
+        run: rm -f server.key
