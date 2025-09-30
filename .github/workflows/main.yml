@@ -1,4 +1,4 @@
-name: Validate & PR from Feature Branch
+name: Validate Delta & Create PR from Feature Branch
 
 on:
   push:
@@ -15,11 +15,11 @@ jobs:
       - name: Start Job
         run: echo "Starting delta validation and PR job..."
 
-      # 2. Checkout full Git history
+      # 2. Checkout full git history for diffs
       - name: Checkout Code
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0  # Required for git diff
+          fetch-depth: 0
 
       # 3. Get branch name
       - name: Get Branch Name
@@ -32,53 +32,90 @@ jobs:
           npm install --global @salesforce/cli
           sf --version
 
-      # 5. Install sfdx-git-delta
+      # 5. Install sfdx-git-delta plugin
       - name: Install sfdx-git-delta
-        run: |
-          sf plugins install sfdx-git-delta
+        run: sf plugins install sfdx-git-delta
 
-      # 6. Authenticate to Dev Org
-      - name: Authenticate to Dev Org
+      # 6. Write JWT private key to file
+      - name: Write JWT Private Key
+        run: echo "${{ secrets.SF_JWT_KEY }}" > server.key
+
+      # 7. Authenticate using JWT
+      - name: Authenticate to Dev Org via JWT
         run: |
-          echo "${{ secrets.SFDX_AUTH_URL_DEV }}" > authfile.txt
-          sf org login sfdx-url --sfdx-url-file authfile.txt --alias dev --set-default
+          sf org login jwt \
+            --client-id ${{ secrets.SF_CLIENT_ID }} \
+            --jwt-key-file server.key \
+            --username ${{ secrets.SF_USERNAME }} \
+            --alias dev \
+            --set-default
           sf org display --target-org dev
-        env:
-          SFDX_AUTH_URL_DEV: ${{ secrets.SFDX_AUTH_URL_DEV }}
 
-      # 7. Generate delta from previous commit
+      # 8. Generate delta package for changed metadata and destructive changes
       - name: Generate Delta Package
+        id: generate_delta
         run: |
           mkdir -p .sgd-delta
-          sfdx sgd:source:delta --to "HEAD" --from "HEAD~1" --output .sgd-delta --generate-destructive-changes --source force-app
+          sfdx sgd:source:delta --to HEAD --from HEAD~1 --output .sgd-delta --generate-destructive-changes --source force-app
 
-      # 8. Validate Delta Deployment
-      - name: Validate Deployment
-        id: validate
-        run: |
+          # Check if delta folder contains source
           if [ -d ".sgd-delta/force-app" ]; then
-            sf project deploy start --target-org dev --source-dir .sgd-delta/force-app --dry-run --ignore-warnings || exit 1
+            echo "delta=true" >> $GITHUB_OUTPUT
           else
-            echo "No changes detected. Skipping validation."
-        continue-on-error: false
+            echo "delta=false" >> $GITHUB_OUTPUT
+          fi
 
-      # 9. Create Pull Request to main (if validation succeeded)
+      # 9. Determine test classes to run based on delta (run all if no Apex changes)
+      - name: Determine Test Classes to Run
+        id: test_classes
+        run: |
+          if [[ "${{ steps.generate_delta.outputs.delta }}" == "true" ]]; then
+            # Find all Apex class names in the delta folder
+            TEST_CLASSES=$(find .sgd-delta/force-app/main/default/classes -name "*.cls" -exec basename {} .cls \; | paste -sd "," -)
+            if [[ -z "$TEST_CLASSES" ]]; then
+              echo "test_classes=RunAllTestsInOrg" >> $GITHUB_OUTPUT
+            else
+              echo "test_classes=$TEST_CLASSES" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "test_classes=RunAllTestsInOrg" >> $GITHUB_OUTPUT
+          fi
+
+      # 10. Validate Deployment (dry run with test classes)
+      - name: Validate Deployment
+        if: steps.generate_delta.outputs.delta == 'true'
+        run: |
+          echo "Running deployment validation with tests: ${{ steps.test_classes.outputs.test_classes }}"
+          sf project deploy start \
+            --target-org dev \
+            --source-dir .sgd-delta/force-app \
+            --test-level RunSpecifiedTests \
+            --tests "${{ steps.test_classes.outputs.test_classes }}" \
+            --dry-run \
+            --ignore-warnings
+
+      # 11. Skip deployment if no delta
+      - name: Skip Deployment - No Changes
+        if: steps.generate_delta.outputs.delta == 'false'
+        run: echo "No changes detected, skipping deployment."
+
+      # 12. Create Pull Request on success
       - name: Create Pull Request
-        if: success()
+        if: success() && steps.generate_delta.outputs.delta == 'true'
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: 'Validated changes for deployment to dev'
-          title: 'Deploy validated changes to main'
+          commit-message: 'Validated delta changes from feature branch ${{ steps.get_branch.outputs.branch_name }}'
+          title: 'Validated Delta Deployment for ${{ steps.get_branch.outputs.branch_name }}'
           body: |
-            This PR was automatically generated after a successful validation deployment to the dev org.
+            This PR is auto-generated after successful validation of delta deployment from feature branch ${{ steps.get_branch.outputs.branch_name }}.
           base: main
           branch: ${{ steps.get_branch.outputs.branch_name }}
 
-      # 10. Cleanup
-      - name: Cleanup Auth File
-        run: rm -f authfile.txt
+      # 13. Cleanup private key file
+      - name: Cleanup
+        run: rm -f server.key
 
-      # 11. Job Complete
+      # 14. Job Complete
       - name: Job Complete
         run: echo "Delta validation and PR workflow complete."
