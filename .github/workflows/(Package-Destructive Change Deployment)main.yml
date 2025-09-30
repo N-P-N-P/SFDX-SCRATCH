@@ -10,13 +10,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Setup Node.js 20 for Salesforce CLI compatibility
+      # Setup Node.js 20 for Salesforce CLI and plugin compatibility
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: "20.x"
 
-      # Checkout full git history for delta detection
+      # Checkout full Git history for accurate delta detection
       - name: Checkout Code
         uses: actions/checkout@v3
         with:
@@ -28,13 +28,13 @@ jobs:
           npm install --global @salesforce/cli
           sf --version
 
-      # Install sfdx-git-delta plugin with auto confirmation
+      # Install sfdx-git-delta plugin with automatic confirmation
       - name: Install sfdx-git-delta plugin
         run: |
           echo y | sf plugins install sfdx-git-delta
           sf sgd source delta --help
 
-      # Authenticate to Salesforce Org using JWT key (secrets required)
+      # Authenticate to Salesforce Org using JWT key from secrets
       - name: Authenticate to Org
         env:
           SF_JWT_KEY: ${{ secrets.SF_JWT_KEY }}
@@ -50,7 +50,7 @@ jobs:
             --set-default
           sf org display --target-org dev
 
-      # Generate delta metadata and destructive changes package.xml
+      # Generate delta package.xml and destructive changes manifest
       - name: Generate Delta and package.xml
         id: delta
         run: |
@@ -72,18 +72,18 @@ jobs:
           sf project deploy start \
             --target-org dev \
             --manifest delta/package/package.xml \
-            --postdestructivechanges delta/destructiveChanges/destructiveChanges.xml \
+            --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
             --dry-run \
             --ignore-warnings
 
-      # Deploy validated changes including destructive changes
+      # Deploy validated changes including deletions
       - name: Deploy Changes to Dev Org
         if: steps.validate.outcome == 'success'
         run: |
           sf project deploy start \
             --target-org dev \
             --manifest delta/package/package.xml \
-            --postdestructivechanges delta/destructiveChanges/destructiveChanges.xml \
+            --post-destructive-changes delta/destructiveChanges/destructiveChanges.xml \
             --ignore-warnings
 
       # Cleanup secret key file
