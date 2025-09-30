@@ -32,7 +32,6 @@ jobs:
       - name: Install sfdx-git-delta plugin
         run: |
           echo y | sf plugins install sfdx-git-delta
-          sf sgd source delta --help
 
       # Authenticate to Salesforce Org using JWT key from secrets
       - name: Authenticate to Org
