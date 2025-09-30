@@ -1,0 +1,94 @@
+name: Simple Delta Deployment
+
+on:
+  push:
+    branches:
+      - 'feature/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Setup Node.js 20 for Salesforce CLI compatibility
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+
+      # Checkout full git history for delta detection
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      # Install Salesforce CLI globally
+      - name: Install Salesforce CLI
+        run: |
+          npm install --global @salesforce/cli
+          sf --version
+
+      # Install sfdx-git-delta plugin with auto confirmation
+      - name: Install sfdx-git-delta plugin
+        run: |
+          echo y | sf plugins install sfdx-git-delta
+          sf sgd source delta --help
+
+      # Authenticate to Salesforce Org using JWT key (secrets required)
+      - name: Authenticate to Org
+        env:
+          SF_JWT_KEY: ${{ secrets.SF_JWT_KEY }}
+          SF_CLIENT_ID: ${{ secrets.SF_CLIENT_ID }}
+          SF_USERNAME: ${{ secrets.SF_USERNAME }}
+        run: |
+          echo "$SF_JWT_KEY" > server.key
+          sf org login jwt \
+            --client-id $SF_CLIENT_ID \
+            --jwt-key-file server.key \
+            --username $SF_USERNAME \
+            --alias dev \
+            --set-default
+          sf org display --target-org dev
+
+      # Generate delta metadata and destructive changes package.xml
+      - name: Generate Delta and package.xml
+        id: delta
+        run: |
+          mkdir -p delta
+          sf sgd source delta --to HEAD --from HEAD~1 --output-dir delta --ignore-whitespace -d
+          if [ -f "delta/package/package.xml" ]; then
+            echo "has_delta=true" >> $GITHUB_OUTPUT
+            echo "Delta package.xml generated:"
+            cat delta/package/package.xml
+          else
+            echo "has_delta=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Validate deployment (dry run) including destructive changes
+      - name: Validate Deployment
+        if: steps.delta.outputs.has_delta == 'true'
+        id: validate
+        run: |
+          sf project deploy start \
+            --target-org dev \
+            --manifest delta/package/package.xml \
+            --postdestructivechanges delta/destructiveChanges/destructiveChanges.xml \
+            --dry-run \
+            --ignore-warnings
+
+      # Deploy validated changes including destructive changes
+      - name: Deploy Changes to Dev Org
+        if: steps.validate.outcome == 'success'
+        run: |
+          sf project deploy start \
+            --target-org dev \
+            --manifest delta/package/package.xml \
+            --postdestructivechanges delta/destructiveChanges/destructiveChanges.xml \
+            --ignore-warnings
+
+      # Cleanup secret key file
+      - name: Cleanup Key File
+        run: rm -f server.key
+
+      - name: Job Complete
+        run: echo "Deployment Job Finished"
