@@ -1,63 +1,84 @@
-name: Deploy to Dev Org
+name: Validate & PR from Feature Branch
 
 on:
   push:
     branches:
-      - main
+      - 'feature/**'
 
 jobs:
-  deploy:
-    name: Deploy to Dev Org
+  validate-and-pr:
+    name: Validate Delta and Create PR
     runs-on: ubuntu-latest
 
     steps:
-    # 1. Setup job
-    - name: Start Job
-      run: echo "Starting deployment job..."
+      # 1. Start job
+      - name: Start Job
+        run: echo "Starting delta validation and PR job..."
 
-    # 2. Checkout code
-    - name: Checkout code
-      uses: actions/checkout@v3
+      # 2. Checkout full Git history
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Required for git diff
 
-    # 3. Get branch name
-    - name: Get branch name
-      id: get_branch
-      run: echo "branch_name=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
+      # 3. Get branch name
+      - name: Get Branch Name
+        id: get_branch
+        run: echo "branch_name=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
 
-    # 4. Install Salesforce CLI
-    - name: Install Salesforce CLI
-      run: |
-        npm install --global @salesforce/cli
-        sf --version
+      # 4. Install Salesforce CLI
+      - name: Install Salesforce CLI
+        run: |
+          npm install --global @salesforce/cli
+          sf --version
 
-    # 5. Map branch to environment
-    - name: Map branch to environment
-      id: env_map
-      run: |
-        if [[ "${{ steps.get_branch.outputs.branch_name }}" == "main" ]]; then
-          echo "env=dev" >> $GITHUB_OUTPUT
-        else
-          echo "Unsupported branch" && exit 1
-        fi
+      # 5. Install sfdx-git-delta
+      - name: Install sfdx-git-delta
+        run: |
+          sf plugins install sfdx-git-delta
 
-    # 6. Authenticate to dev org (use SFDX Auth URL stored in GitHub Secrets)
-    - name: Authenticate to Dev Org
-      run: |
-        echo "${{ secrets.SFDX_AUTH_URL_DEV }}" > authfile.txt
-        sf org login sfdx-url --sfdx-url-file authfile.txt --alias dev --set-default
-        sf org display --target-org dev
-      env:
-        SFDX_AUTH_URL_DEV: ${{ secrets.SFDX_AUTH_URL_DEV }}
+      # 6. Authenticate to Dev Org
+      - name: Authenticate to Dev Org
+        run: |
+          echo "${{ secrets.SFDX_AUTH_URL_DEV }}" > authfile.txt
+          sf org login sfdx-url --sfdx-url-file authfile.txt --alias dev --set-default
+          sf org display --target-org dev
+        env:
+          SFDX_AUTH_URL_DEV: ${{ secrets.SFDX_AUTH_URL_DEV }}
 
-    # 7. Run deployment on target org -> dev
-    - name: Deploy Source to Dev Org
-      run: |
-        sf project deploy start --target-org dev --source-dir force-app
+      # 7. Generate delta from previous commit
+      - name: Generate Delta Package
+        run: |
+          mkdir -p .sgd-delta
+          sfdx sgd:source:delta --to "HEAD" --from "HEAD~1" --output .sgd-delta --generate-destructive-changes --source force-app
 
-    # 8. Post checkout code / cleanup
-    - name: Cleanup auth file
-      run: rm authfile.txt
+      # 8. Validate Delta Deployment
+      - name: Validate Deployment
+        id: validate
+        run: |
+          if [ -d ".sgd-delta/force-app" ]; then
+            sf project deploy start --target-org dev --source-dir .sgd-delta/force-app --dry-run --ignore-warnings || exit 1
+          else
+            echo "No changes detected. Skipping validation."
+        continue-on-error: false
 
-    # 9. Complete job
-    - name: Deployment Completed
-      run: echo "Deployment process completed successfully."
+      # 9. Create Pull Request to main (if validation succeeded)
+      - name: Create Pull Request
+        if: success()
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'Validated changes for deployment to dev'
+          title: 'Deploy validated changes to main'
+          body: |
+            This PR was automatically generated after a successful validation deployment to the dev org.
+          base: main
+          branch: ${{ steps.get_branch.outputs.branch_name }}
+
+      # 10. Cleanup
+      - name: Cleanup Auth File
+        run: rm -f authfile.txt
+
+      # 11. Job Complete
+      - name: Job Complete
+        run: echo "Delta validation and PR workflow complete."
