@@ -3,7 +3,7 @@
     <applicationVisibilities>
         <application>ABC</application>
         <default>false</default>
-        <visible>false</visible>
+        <visible>true</visible>
     </applicationVisibilities>
     <applicationVisibilities>
         <application>HungerBox</application>
